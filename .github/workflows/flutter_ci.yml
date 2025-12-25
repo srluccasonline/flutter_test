@@ -1,12 +1,15 @@
-name: Multi-Platform Build & Artifacts
+name: Build & Release
 
 on:
   push:
-    branches: [ "main" ]
-  workflow_dispatch:
+    branches: [ "main" ]     # Roda CI normal (sem release) ao commitar código
+    tags: [ "v*" ]           # Roda CI + RELEASE ao criar tags (ex: v1.0.0)
+
+permissions:
+  contents: write # Obrigatório para criar Releases
 
 jobs:
-  build-all:
+  build-and-release:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -15,50 +18,47 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: apk # Android
+            target: apk
             build_cmd: flutter build apk --debug
-            output_path: build/app/outputs/flutter-apk/app-debug.apk
-            artifact_suffix: android
+            # Caminho original do build
+            build_path: build/app/outputs/flutter-apk/app-debug.apk
+            # Nome final para a Release (arquivo único)
+            asset_name: app-android-debug.apk
+            asset_content_type: application/vnd.android.package-archive
             
           - os: windows-latest
             target: windows
             build_cmd: flutter build windows --debug
-            output_path: build/windows/x64/runner/Debug
-            artifact_suffix: windows-x64
+            # Windows gera uma pasta, precisamos zipar antes de subir
+            build_path: build/windows/x64/runner/Debug
+            asset_name: app-windows-debug.zip
+            asset_content_type: application/zip
             
           - os: ubuntu-latest
             target: linux
             build_cmd: flutter build linux --debug
-            output_path: build/linux/x64/debug/bundle
-            artifact_suffix: linux-x64
+            build_path: build/linux/x64/debug/bundle
+            asset_name: app-linux-debug.zip
+            asset_content_type: application/zip
             
-          # macOS consome mais minutos do GitHub Actions (fique atento ao limite free)
           - os: macos-latest
             target: macos
             build_cmd: flutter build macos --debug
-            output_path: build/macos/Build/Products/Debug
-            artifact_suffix: macos-x64
+            build_path: build/macos/Build/Products/Debug
+            asset_name: app-macos-debug.zip
+            asset_content_type: application/zip
 
     steps:
       - uses: actions/checkout@v4
 
-      # --- 1. Extração da Versão do pubspec.yaml ---
-      - name: Extract Version
-        id: version
-        shell: bash
-        run: |
-          # Extrai a versão (ex: 1.0.0+1)
-          VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: //g' | tr -d ' ')
-          echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
-
-      # --- Setup de Ambiente (Linux precisa de deps extras) ---
+      # --- Setup ---
       - name: Install Linux Dependencies
         if: matrix.target == 'linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev
 
-      - name: Setup Java (Android only)
+      - name: Setup Java (Android)
         if: matrix.target == 'apk'
         uses: actions/setup-java@v4
         with:
@@ -74,14 +74,37 @@ jobs:
       - name: Get Dependencies
         run: flutter pub get
 
+      # --- Build ---
       - name: Build ${{ matrix.target }}
         run: ${{ matrix.build_cmd }}
 
-      # --- 2. Upload com Nome Versionado ---
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+      # --- Zip Manual (Apenas para Desktop) ---
+      # O Github Releases precisa de arquivos, não pastas.
+      # O 'build_path' do Windows/Linux/Mac é uma pasta, então zipamos ela.
+      
+      - name: Zip Windows Build
+        if: matrix.target == 'windows'
+        run: powershell Compress-Archive -Path ${{ matrix.build_path }}/* -DestinationPath ${{ matrix.asset_name }}
+
+      - name: Zip Linux Build
+        if: matrix.target == 'linux'
+        run: cd ${{ matrix.build_path }} && zip -r ../../../../../${{ matrix.asset_name }} .
+
+      - name: Zip macOS Build
+        if: matrix.target == 'macos'
+        # O .app é uma pasta, zipamos para facilitar o download
+        run: cd ${{ matrix.build_path }} && zip -r ../../../../../${{ matrix.asset_name }} .
+
+      # --- Handle File Path for Android (No Zip needed) ---
+      - name: Prepare Android Asset
+        if: matrix.target == 'apk'
+        run: cp ${{ matrix.build_path }} ${{ matrix.asset_name }}
+
+      # --- Upload to Release (Só roda se for TAG) ---
+      - name: Upload binaries to Release
+        uses: ncipollo/release-action@v1
+        if: startsWith(github.ref, 'refs/tags/')
         with:
-          # O zip baixado será algo como: app-v1.0.0+1-android.zip
-          name: app-v${{ env.APP_VERSION }}-${{ matrix.artifact_suffix }}
-          path: ${{ matrix.output_path }}
-          retention-days: 5
+          artifacts: ${{ matrix.asset_name }}
+          allowUpdates: true    # Permite que jobs paralelos (Win/Linux) atualizem a mesma release
+          token: ${{ secrets.GITHUB_TOKEN }}
