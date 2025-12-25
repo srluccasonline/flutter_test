@@ -1,0 +1,87 @@
+name: Multi-Platform Build & Artifacts
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build-all:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: apk # Android
+            build_cmd: flutter build apk --debug
+            output_path: build/app/outputs/flutter-apk/app-debug.apk
+            artifact_suffix: android
+            
+          - os: windows-latest
+            target: windows
+            build_cmd: flutter build windows --debug
+            output_path: build/windows/x64/runner/Debug
+            artifact_suffix: windows-x64
+            
+          - os: ubuntu-latest
+            target: linux
+            build_cmd: flutter build linux --debug
+            output_path: build/linux/x64/debug/bundle
+            artifact_suffix: linux-x64
+            
+          # macOS consome mais minutos do GitHub Actions (fique atento ao limite free)
+          - os: macos-latest
+            target: macos
+            build_cmd: flutter build macos --debug
+            output_path: build/macos/Build/Products/Debug
+            artifact_suffix: macos-x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- 1. Extração da Versão do pubspec.yaml ---
+      - name: Extract Version
+        id: version
+        shell: bash
+        run: |
+          # Extrai a versão (ex: 1.0.0+1)
+          VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: //g' | tr -d ' ')
+          echo "APP_VERSION=$VERSION" >> $GITHUB_ENV
+
+      # --- Setup de Ambiente (Linux precisa de deps extras) ---
+      - name: Install Linux Dependencies
+        if: matrix.target == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev
+
+      - name: Setup Java (Android only)
+        if: matrix.target == 'apk'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Get Dependencies
+        run: flutter pub get
+
+      - name: Build ${{ matrix.target }}
+        run: ${{ matrix.build_cmd }}
+
+      # --- 2. Upload com Nome Versionado ---
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          # O zip baixado será algo como: app-v1.0.0+1-android.zip
+          name: app-v${{ env.APP_VERSION }}-${{ matrix.artifact_suffix }}
+          path: ${{ matrix.output_path }}
+          retention-days: 5
